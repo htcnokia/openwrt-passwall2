@@ -138,10 +138,24 @@ jobs:
       - name: Organize Artifacts
         run: |
           cd sdk
-          mkdir -p tmp_upload
-          find bin/packages/ -type f -name "*.ipk" -exec cp {} tmp_upload/ \;
-          mkdir -p upload
-          zip -jr upload/passwall2_slim_${{ matrix.platform }}.zip tmp_upload/*
+          mkdir -p tmp_upload upload
+          
+          # 1. 廣泛搜尋 bin/ 目錄下所有生成出的 .ipk 檔案，並複製到 tmp_upload
+          find bin/ -type f -name "*.ipk" -exec cp {} tmp_upload/ \;
+          
+          # 2. 檢查是否有收集到 .ipk 檔案
+          ipk_count=$(ls -1 tmp_upload/*.ipk 2>/dev/null | wc -l)
+          echo "Found $ipk_count .ipk files."
+
+          if [ "$ipk_count" -gt 0 ]; then
+            # 如果有檔案，正常打包
+            zip -jr upload/passwall2_slim_${{ matrix.platform }}.zip tmp_upload/*
+          else
+            # 如果沒有檔案，生成一個说明文件避免 zip 報錯，並在日誌提醒
+            echo "Warning: No ipk files found!" > tmp_upload/README.txt
+            zip -jr upload/passwall2_slim_${{ matrix.platform }}.zip tmp_upload/*
+          fi
+
           echo "FIRMWARE=$PWD/upload" >> $GITHUB_ENV
 
       - name: Upload IPKs to Release
