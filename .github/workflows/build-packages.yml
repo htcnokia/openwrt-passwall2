@@ -54,12 +54,20 @@ jobs:
       # 3. 準備 SDK Feeds 與依賴套件 (複製源碼至 SDK)
       - name: Prepare SDK Packages
         run: |
-          cd $SDK_HOME
-          # 1. 複製 PassWall2 主包與依賴包到 SDK 的 package 目錄
-          cp -rb $GITHUB_WORKSPACE/luci-app-passwall2 package/
-          cp -rb $GITHUB_WORKSPACE/passwall-depends package/ || true
-          
-          # 2. 更新並安裝 SDK Feeds (確保依賴鏈完整)
+          # 1. 自動定位 SDK 根目錄（尋找包含 scripts/feeds 的目錄）
+          SDK_DIR=$(find $GITHUB_WORKSPACE -maxdepth 2 -type f -name "feeds" -path "*/scripts/*" | head -n 1 | xargs dirname | xargs dirname)
+          if [ -z "$SDK_DIR" ]; then
+            SDK_DIR="$SDK_HOME"
+          fi
+          echo "SDK Directory is: $SDK_DIR"
+          cd "$SDK_DIR"
+
+          # 2. 複製 PassWall2 主包與依賴包（加上 -f 避免報錯，加上通配符處理）
+          mkdir -p package/
+          cp -rb $GITHUB_WORKSPACE/luci-app-passwall2 package/ 2>/dev/null || true
+          [ -d "$GITHUB_WORKSPACE/passwall-depends" ] && cp -rb $GITHUB_WORKSPACE/passwall-depends package/ || true
+
+          # 3. 更新並安裝 SDK Feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
