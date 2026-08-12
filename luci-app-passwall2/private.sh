@@ -1,49 +1,48 @@
 #!/bin/bash
-# private.sh - 用於動態修補與極致瘦身的私有構建腳本
+# private.sh - 配合官方 SDK Workflow 的動態瘦身腳本
 
 echo "=========================================="
-echo " Starting Dynamic Slimming & Modification "
+echo " [Private] Starting PassWall2 Slimming    "
 echo "=========================================="
 
-# 1. 尋找並修補 PassWall2 的 Makefile（砍掉除 xray-core 以外的所有核心依賴）
-PASSWALL_MAKEFILE=$(find package/ -type f -path "*/luci-app-passwall2/Makefile" | head -n 1)
+# 1. 精簡 PassWall2 主包 Makefile
+# 搜尋 SDK 內部 package/ 下所有的 luci-app-passwall2 Makefile
+PASSWALL_MAKEFILES=$(find package/ -type f -name "Makefile" -path "*/luci-app-passwall2/*")
 
-if [ -n "$PASSWALL_MAKEFILE" ]; then
-    echo "[+] Modifying PassWall2 Makefile: $PASSWALL_MAKEFILE"
+for mk in $PASSWALL_MAKEFILES; do
+    echo "[+] Slimming PassWall2 Makefile: $mk"
     
-    # 移除 v2ray-core, sing-box, trojan, hysteria, haproxy 等多餘依賴
-    # 僅保留 xray-core, dnsmasq, ip-full, ca-bundle, kmod-nft-tproxy
-    sed -i '/INCLUDE_/d' "$PASSWALL_MAKEFILE"
-    sed -i 's/+luci-app-passwall2_INCLUDE_[^ ]*/ /g' "$PASSWALL_MAKEFILE"
+    # 刪除所有可選的依賴選項配置 (INCLUDE_xxx)
+    sed -i '/config LUCI_APP_PASSWALL2_INCLUDE_/d' "$mk" 2>/dev/null || true
+    sed -i '/default y if/d' "$mk" 2>/dev/null || true
     
-    # 強制修正依賴為極簡組合
-    sed -i '/DEPENDS:=/c\  DEPENDS:=+xray-core +dnsmasq-full +ip-full +ca-bundle +kmod-nft-tproxy' "$PASSWALL_MAKEFILE"
-fi
+    # 徹底清理 DEPENDS 欄位，刪除所有 +luci-app-passwall2_INCLUDE_ 開頭的依賴
+    # 僅保留極簡基礎依賴 + xray-core
+    sed -i 's/+luci-app-passwall2_INCLUDE_[^ ]*/ /g' "$mk"
+    sed -i '/DEPENDS:=/c\  DEPENDS:=+xray-core +dnsmasq-full +ip-full +ca-bundle +kmod-nft-tproxy' "$mk"
+done
 
-# 2. 尋找並修補 Xray-Core 的 Makefile（注入 Golang 瘦身編譯參數與 UPX 壓縮）
-XRAY_MAKEFILE=$(find package/ -type f -path "*/xray-core/Makefile" | head -n 1)
+# 2. 精簡 Xray-Core Makefile (裁剪協議 + UPX 壓縮)
+XRAY_MAKEFILES=$(find package/ -type f -name "Makefile" -path "*/xray-core/*")
 
-if [ -n "$XRAY_MAKEFILE" ]; then
-    echo "[+] Modifying Xray-Core Makefile: $XRAY_MAKEFILE"
+for xmk in $XRAY_MAKEFILES; do
+    echo "[+] Slimming & UPX Xray-Core Makefile: $xmk"
     
-    # 注入 Go 編譯參數：移除 Debug 符號 (-s -w) 並剔除無用協議標籤
-    # 僅保留 VLESS / REALITY / gRPC / WS / TLS
-    if ! grep -q "GO_BUILD_TAGS:=" "$XRAY_MAKEFILE"; then
-        echo 'GO_BUILD_LDFLAGS:=-s -w -buildid=' >> "$XRAY_MAKEFILE"
-        echo 'GO_BUILD_TAGS:=confonly,noless,novmess,notrojan,noshadowsocks,nossr' >> "$XRAY_MAKEFILE"
+    # 注入 Golang 瘦身標籤 (去除 Debug 符號、移除 VMess/Trojan/SSR 等無用協議)
+    if ! grep -q "GO_BUILD_TAGS:=" "$xmk"; then
+        sed -i '/PKG_NAME:=xray-core/a GO_BUILD_LDFLAGS:=-s -w -buildid=\nGO_BUILD_TAGS:=confonly,noless,novmess,notrojan,noshadowsocks,nossr' "$xmk"
     fi
     
-    # 注入 UPX 壓縮指令到 Install 區塊
-    if grep -q "upx" "$XRAY_MAKEFILE"; then
-        echo "[!] UPX rule already exists in Xray Makefile."
-    else
-        sed -i '/define Package\/xray-core\/install/a \	upx --best --lzma $(1)/usr/bin/xray || true' "$XRAY_MAKEFILE"
+    # 注入 UPX 高倍率壓縮指令
+    if ! grep -q "upx" "$xmk"; then
+        sed -i '/define Package\/xray-core\/install/a \	upx --best --lzma $(1)/usr/bin/xray || true' "$xmk"
     fi
-fi
+done
 
-# 3. 移除大體積 Geodata 依賴 (改為遠端動態下載，不打包進 ipk/apk)
-find package/ -type f -name "Makefile" -path "*/v2ray-geodata/*" -exec rm -f {} \; 2>/dev/null || true
+# 3. 刪除多餘的核心包 Makefile (避免 SDK 誤編譯 v2ray, sing-box, trojan 等)
+echo "[+] Removing redundant core packages from SDK..."
+find package/ -type d -name "sing-box" -o -name "v2ray-core" -o -name "v2ray-geodata" -o -name "hysteria" -o -name "trojan*" -o -name "naiveproxy" | xargs rm -rf 2>/dev/null || true
 
 echo "=========================================="
-echo " Dynamic Slimming Completed Successfully! "
+echo " [Private] Slimming completed!            "
 echo "=========================================="
