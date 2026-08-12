@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          # 中興 ZN M2 (aarch64) 目標架構
+          #  ZN M2 (aarch64) 目標架構
           - arch: aarch64_generic
             sdk_ver: "24.10.0"  # 產出 .ipk
           - arch: aarch64_generic
