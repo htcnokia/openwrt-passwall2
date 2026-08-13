@@ -142,8 +142,8 @@ jobs:
           cd sdk
           mkdir -p tmp_upload upload
           
-          # 【修改】新增 luci-i18n-passwall2* 匹配
-          find bin/ -type f \( -name "luci-app-passwall2*" -o -name "luci-i18n-passwall2*" -o -name "xray-core*" -o -name "v2ray-geodata*" -o -name "ca-bundle*" \) -exec cp {} tmp_upload/ \;
+          # 放寬匹配規則：包含 luci-i18n* 與 passwall2 相關的所有語言包
+          find bin/ -type f \( -name "luci-app-passwall2*" -o -name "luci-i18n-passwall2*" -o -name "luci-i18n-passwall*" -o -name "xray-core*" -o -name "v2ray-geodata*" -o -name "ca-bundle*" \) -exec cp {} tmp_upload/ \;
           
           pkg_count=$(ls -1 tmp_upload/* 2>/dev/null | wc -l)
           echo "Successfully collected $pkg_count target package files."
