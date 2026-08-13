@@ -7,7 +7,7 @@ on:
 env:
   TZ: Asia/Shanghai
   passwall2: ${{ github.repository }}
-  # 【修改 1】精簡 package_names，只保留 xray-core (以及 geodata)
+  # 保留 v2ray-geodata 以進行 AI 分流 (geoip / geosite)
   package_names: "v2ray-geodata xray-core"
 
 permissions:
@@ -79,26 +79,28 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # 允許 Go 工具鏈自動下載與升級
+      # 解除 Go 工具鏈版本限制
       - name: Unlock Go Toolchain Restriction
         run: |
           cd sdk
           find feeds/ -type f -name "golang-build.sh" -exec sed -i 's/GOTOOLCHAIN=local/GOTOOLCHAIN=auto/g' {} + || true
 
-      # 注入 private.sh 精簡與 UPX 腳本
+      # 注入 PassWall2 並執行瘦身腳本
       - name: Apply Private Slim & UPX Script
         run: |
           mkdir -p sdk/package/luci-app-passwall2
-          cp -rf Makefile Config-build.in root luci-app-passwall2/ 2>/dev/null || cp -rf ./* sdk/package/luci-app-passwall2/ 2>/dev/null || true
+          # 精準複製檔案，防止雜檔污染 SDK 目錄
+          cp -r Makefile Config-build.in root hdoc lua luasrc src sdk/package/luci-app-passwall2/ 2>/dev/null || cp -rf ./* sdk/package/luci-app-passwall2/ 2>/dev/null || true
           
           if [ -f "private.sh" ]; then
             chmod +x private.sh
+            cp private.sh sdk/
             cd sdk
-            ../private.sh
+            ./private.sh
             cd ..
           fi
 
-      # 【修改 2】精簡 .config，關閉預設模組，只保留 Xray
+      # 精簡 .config 配置
       - name: Configure .config
         run: |
           cd sdk
@@ -107,20 +109,23 @@ jobs:
           echo "CONFIG_ALL=n" >> .config
           echo "CONFIG_PACKAGE_luci-app-passwall2=m" >> .config
           echo "CONFIG_PACKAGE_xray-core=m" >> .config
+          echo "CONFIG_PACKAGE_v2ray-geodata=m" >> .config
           echo "CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Xray=y" >> .config
           
-          # 強制關閉其他不必要的 INCLUDE 選項
+          # 關閉不必要的模組
           echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_ChinaDNS_NG is not set" >> .config
           echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Sing_Box is not set" >> .config
           echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_V2ray_Plugin is not set" >> .config
+          echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Shadowsocks_Libev_Client is not set" >> .config
+          echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_ShadowsocksR_Libev_Client is not set" >> .config
           
           make defconfig
 
-      # 【修改 3】優化編譯邏輯與產物收集
+      # 編譯套件
       - name: Compile Passwall2 & Packages
         run: |
           cd sdk
-          # 1. 編譯核心依賴包 (Xray 等)
+          # 1. 編譯核心依賴包 (Xray 與 Geodata)
           for package in ${{ env.package_names }}; do
               if [ -d "feeds/passwall_packages/$package" ]; then
                   echo "----------- Begin Compiling $package ---------------"
@@ -131,13 +136,13 @@ jobs:
           # 2. 編譯 PassWall2 主套件
           make package/luci-app-passwall2/compile -j$(nproc) V=s || make package/luci-app-passwall2/compile -j1 V=s
 
-      # 【修改 4】智能過濾產物，剔除 SDK 附帶的通用 kmod 和無關 apk/ipk
+      # 收集編譯產物
       - name: Organize Artifacts
         run: |
           cd sdk
           mkdir -p tmp_upload upload
           
-          # 僅複製 Passwall2、Xray 和 Geodata，踢除所有 kmod-* 與無關的硬體驅動 apk/ipk
+          # 僅複製 Passwall2, Xray 和 Geodata，剔除 kmod 與其他非必要檔案
           find bin/ -type f \( -name "luci-app-passwall2*" -o -name "xray-core*" -o -name "v2ray-geodata*" -o -name "ca-bundle*" \) -exec cp {} tmp_upload/ \;
           
           pkg_count=$(ls -1 tmp_upload/* 2>/dev/null | wc -l)
@@ -152,10 +157,12 @@ jobs:
 
           echo "FIRMWARE=$PWD/upload" >> $GITHUB_ENV
 
+      # 發布產物至 GitHub Release
       - name: Upload Packages to Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: v${{ needs.job_check.outputs.passwall2_version }}-slim
           files: ${{ env.FIRMWARE }}/*
+          overwrite: true
