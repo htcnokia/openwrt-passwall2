@@ -1,0 +1,161 @@
+name: "Auto compile Slim PassWall2 with SDK"
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+  passwall2: ${{ github.repository }}
+  # 【修改 1】精簡 package_names，只保留 xray-core (以及 geodata)
+  package_names: "v2ray-geodata xray-core"
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  job_check:
+    name: Check Version
+    runs-on: ubuntu-latest
+    outputs:
+      passwall2_version: ${{ steps.check_version.outputs.latest_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check version
+        id: check_version
+        run: |
+          latest_version=$(awk -F ':=' '/^PKG_VERSION:=|^PKG_RELEASE:=/ {print $2}' Makefile 2>/dev/null | tr -d ' ' || echo "1.0.0")
+          echo "latest_version=${latest_version}" >> $GITHUB_OUTPUT
+
+  job_auto_compile:
+    needs: job_check
+    runs-on: ubuntu-latest
+    name: build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 1. 路由器 ARM64 (中興 ZN M2 等 Filogic 方案)
+          - platform: aarch64_cortex-a53
+            url_sdk: https://downloads.openwrt.org/snapshots/targets/mediatek/filogic/openwrt-sdk-mediatek-filogic_gcc-14.4.0_musl.Linux-x86_64.tar.zst
+
+          # 2. 軟路由 x86_64
+          - platform: x86_64
+            url_sdk: https://downloads.openwrt.org/snapshots/targets/x86/64/openwrt-sdk-x86-64_gcc-14.4.0_musl.Linux-x86_64.tar.zst
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Initialization Environment
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install -y build-essential git wget curl unzip upx-ucl zstd golang
+          sudo -E apt-get -qq clean
+
+      - name: Download & Extract OpenWrt SDK
+        run: |
+          mkdir sdk
+          wget ${{ matrix.url_sdk }} -O sdk.tar.zst
+          tar --zstd -x -f sdk.tar.zst -C ./sdk --strip-components=1
+          
+          cd sdk
+          # 更新 Feeds 源
+          sed -i \
+              -e 's|git\.openwrt\.org/feed|github.com/openwrt|g' \
+              -e 's|git\.openwrt\.org/project|github.com/openwrt|g' \
+              -e 's|git\.openwrt\.org/openwrt|github.com/openwrt|g' \
+              "feeds.conf.default"
+
+          cat > feeds.tmp <<'EOF'
+          src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main
+          EOF
+          cat feeds.conf.default >> feeds.tmp
+          mv feeds.tmp feeds.conf.default
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # 允許 Go 工具鏈自動下載與升級
+      - name: Unlock Go Toolchain Restriction
+        run: |
+          cd sdk
+          find feeds/ -type f -name "golang-build.sh" -exec sed -i 's/GOTOOLCHAIN=local/GOTOOLCHAIN=auto/g' {} + || true
+
+      # 注入 private.sh 精簡與 UPX 腳本
+      - name: Apply Private Slim & UPX Script
+        run: |
+          mkdir -p sdk/package/luci-app-passwall2
+          cp -rf Makefile Config-build.in root luci-app-passwall2/ 2>/dev/null || cp -rf ./* sdk/package/luci-app-passwall2/ 2>/dev/null || true
+          
+          if [ -f "private.sh" ]; then
+            chmod +x private.sh
+            cd sdk
+            ../private.sh
+            cd ..
+          fi
+
+      # 【修改 2】精簡 .config，關閉預設模組，只保留 Xray
+      - name: Configure .config
+        run: |
+          cd sdk
+          echo "CONFIG_ALL_NONSHARED=n" > .config
+          echo "CONFIG_ALL_KMODS=n" >> .config
+          echo "CONFIG_ALL=n" >> .config
+          echo "CONFIG_PACKAGE_luci-app-passwall2=m" >> .config
+          echo "CONFIG_PACKAGE_xray-core=m" >> .config
+          echo "CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Xray=y" >> .config
+          
+          # 強制關閉其他不必要的 INCLUDE 選項
+          echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_ChinaDNS_NG is not set" >> .config
+          echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Sing_Box is not set" >> .config
+          echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_V2ray_Plugin is not set" >> .config
+          
+          make defconfig
+
+      # 【修改 3】優化編譯邏輯與產物收集
+      - name: Compile Passwall2 & Packages
+        run: |
+          cd sdk
+          # 1. 編譯核心依賴包 (Xray 等)
+          for package in ${{ env.package_names }}; do
+              if [ -d "feeds/passwall_packages/$package" ]; then
+                  echo "----------- Begin Compiling $package ---------------"
+                  make package/$package/compile -j$(nproc) V=s || make package/$package/compile -j1 V=s
+              fi
+          done
+          
+          # 2. 編譯 PassWall2 主套件
+          make package/luci-app-passwall2/compile -j$(nproc) V=s || make package/luci-app-passwall2/compile -j1 V=s
+
+      # 【修改 4】智能過濾產物，剔除 SDK 附帶的通用 kmod 和無關 apk/ipk
+      - name: Organize Artifacts
+        run: |
+          cd sdk
+          mkdir -p tmp_upload upload
+          
+          # 僅複製 Passwall2、Xray 和 Geodata，踢除所有 kmod-* 與無關的硬體驅動 apk/ipk
+          find bin/ -type f \( -name "luci-app-passwall2*" -o -name "xray-core*" -o -name "v2ray-geodata*" -o -name "ca-bundle*" \) -exec cp {} tmp_upload/ \;
+          
+          pkg_count=$(ls -1 tmp_upload/* 2>/dev/null | wc -l)
+          echo "Successfully collected $pkg_count target package files."
+
+          if [ "$pkg_count" -gt 0 ]; then
+            zip -jr upload/passwall2_slim_${{ matrix.platform }}.zip tmp_upload/*
+          else
+            echo "Error: No target ipk/apk files found!" > tmp_upload/README.txt
+            zip -jr upload/passwall2_slim_${{ matrix.platform }}.zip tmp_upload/*
+          fi
+
+          echo "FIRMWARE=$PWD/upload" >> $GITHUB_ENV
+
+      - name: Upload Packages to Release
+        uses: softprops/action-gh-release@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ needs.job_check.outputs.passwall2_version }}-slim
+          files: ${{ env.FIRMWARE }}/*
