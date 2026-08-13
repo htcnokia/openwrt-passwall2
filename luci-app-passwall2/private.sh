@@ -1,23 +1,23 @@
 #!/bin/bash
-# private.sh - PassWall2 (VLESS + TCP + REALITY 專用極致瘦身腳本)
+# private.sh - PassWall2 (VLESS + TCP + REALITY 專用極致瘦身與中文語言包注入腳本)
 
 echo "=================================================="
 echo " [Private] Starting PassWall2 Slimming (REALITY)  "
 echo "=================================================="
 
-# 1. 精簡 PassWall2 主包 Makefile
+# 1. 精簡 PassWall2 主包 Makefile 並注入中文語言包依賴
 PASSWALL_MAKEFILES=$(find package/ -type f -name "Makefile" -path "*/luci-app-passwall2/*")
 
 for mk in $PASSWALL_MAKEFILES; do
-    echo "[+] Slimming PassWall2 Makefile: $mk"
+    echo "[+] Processing PassWall2 Makefile: $mk"
     
-    # 刪除可選模組配置
+    # 刪除可選模組配置選項
     sed -i '/config LUCI_APP_PASSWALL2_INCLUDE_/d' "$mk" 2>/dev/null || true
     sed -i '/default y if/d' "$mk" 2>/dev/null || true
     
-    # 清理 DEPENDS 欄位，僅保留極簡核心依賴
+    # 清理舊依賴，並強制加入 +luci-i18n-passwall2-zh-cn (中文語言包)
     sed -i 's/+luci-app-passwall2_INCLUDE_[^ ]*/ /g' "$mk"
-    sed -i '/DEPENDS:=/c\  DEPENDS:=+xray-core +v2ray-geodata +dnsmasq-full +ip-full +ca-bundle +kmod-nft-tproxy' "$mk"
+    sed -i '/DEPENDS:=/c\  DEPENDS:=+xray-core +v2ray-geodata +dnsmasq-full +ip-full +ca-bundle +kmod-nft-tproxy +luci-i18n-passwall2-zh-cn' "$mk"
 done
 
 # 2. 精簡 Xray-Core Makefile (僅留 VLESS + REALITY 所需的 TLS/uTLS，剔除其餘協定)
@@ -42,5 +42,5 @@ echo "[+] Removing redundant core packages..."
 find package/ -type d \( -name "sing-box" -o -name "v2ray-core" -o -name "v2ray-plugin" -o -name "hysteria" -o -name "trojan*" -o -name "naiveproxy" -o -name "chinadns-ng" \) -exec rm -rf {} + 2>/dev/null || true
 
 echo "=================================================="
-echo " [Private] REALITY Slimming completed!            "
+echo " [Private] Slimming & i18n Injection completed!   "
 echo "=================================================="
