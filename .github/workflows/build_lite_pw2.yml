@@ -1,4 +1,4 @@
-name: Build PassWall2 Slim
+name: "Auto compile Slim PassWall2 with SDK"
 
 on:
   repository_dispatch:
@@ -7,6 +7,11 @@ on:
 env:
   TZ: Asia/Shanghai
   passwall2: ${{ github.repository }}
+  package_names: "v2ray-geodata xray-core"
+
+permissions:
+  contents: write
+  actions: write
 
 jobs:
   job_check:
@@ -14,76 +19,99 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       passwall2_version: ${{ steps.check_version.outputs.latest_version }}
-      has_update: ${{ steps.check_version.outputs.has_update }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Check version
         id: check_version
-        env:
-          url_tags: https://api.github.com/repos/${{ env.passwall2 }}/releases/latest
         run: |
-          cd luci-app-passwall2
-          latest_version=$(awk -F ':=' '/^PKG_VERSION:=|^PKG_RELEASE:=/ {print $2}' Makefile | sed ':a;N;s/\$(PKG_VERSION)-//;s/\n$//;s/\n/-/;ba')
+          latest_version=$(awk -F ':=' '/^PKG_VERSION:=|^PKG_RELEASE:=/ {print $2}' Makefile 2>/dev/null | tr -d ' ' | tr '\n' '-' | sed 's/-$//' || echo "1.0.0")
+          if [ -z "$latest_version" ]; then latest_version="1.0.0"; fi
           echo "latest_version=${latest_version}" >> $GITHUB_OUTPUT
-          
-          remote_latest_version=$(wget -qO- -t1 -T2 ${{env.url_tags}} | jq -r '.tag_name' 2>/dev/null || echo "")
-          if [ -z "$remote_latest_version" ] || [ "$remote_latest_version" = "null" ]; then
-            echo "has_update=true" >> $GITHUB_OUTPUT
-          elif [ "$latest_version-slim" = "$remote_latest_version" ]; then
-            echo "has_update=false" >> $GITHUB_OUTPUT
-          else
-            echo "has_update=true" >> $GITHUB_OUTPUT
-          fi
 
-  job_build:
-    name: Build (${{ matrix.platform }})
+  job_auto_compile:
     needs: job_check
-    if: needs.job_check.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    name: build (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: x86_64
-            url_sdk: https://downloads.openwrt.org/snapshots/targets/x86/64/openwrt-sdk-x86-64_gcc-14.4.0_musl.Linux-x86_64.tar.zst
           - platform: aarch64_cortex-a53
             url_sdk: https://downloads.openwrt.org/snapshots/targets/mediatek/filogic/openwrt-sdk-mediatek-filogic_gcc-14.4.0_musl.Linux-x86_64.tar.zst
+          - platform: x86_64
+            url_sdk: https://downloads.openwrt.org/snapshots/targets/x86/64/openwrt-sdk-x86-64_gcc-14.4.0_musl.Linux-x86_64.tar.zst
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Environment
+      - name: Initialization Environment
         run: |
           sudo -E apt-get -qq update
-          sudo -E apt-get -qq install build-essential clang flex gawk gcc-multilib gettext git libncurses5-dev libssl-dev python3-setuptools rsync unzip zstd upx
+          sudo -E apt-get -qq install -y build-essential git wget curl unzip upx-ucl zstd golang python3-setuptools
           sudo -E apt-get -qq clean
 
       - name: Download & Extract OpenWrt SDK
         run: |
-          wget ${{ matrix.url_sdk }} -O sdk.tar.zst
           mkdir sdk
+          wget ${{ matrix.url_sdk }} -O sdk.tar.zst
           tar --zstd -x -f sdk.tar.zst -C ./sdk --strip-components=1
-
-      - name: Update Feeds
-        run: |
+          
           cd sdk
-          cat > feeds.conf.default <<EOF
-          src-git packages https://github.com/openwrt/packages.git
-          src-git luci https://github.com/openwrt/luci.git
+          # 更新 Feeds 源
+          sed -i \
+              -e 's|git\.openwrt\.org/feed|github.com/openwrt|g' \
+              -e 's|git\.openwrt\.org/project|github.com/openwrt|g' \
+              -e 's|git\.openwrt\.org/openwrt|github.com/openwrt|g' \
+              "feeds.conf.default"
+
+          cat > feeds.tmp <<'EOF'
           src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main
-          src-link passwall2 $GITHUB_WORKSPACE/luci-app-passwall2
+          src-link passwall2 ${{ github.workspace }}
           EOF
+          cat feeds.conf.default >> feeds.tmp
+          mv feeds.tmp feeds.conf.default
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Run Private Slimming Script
+      # 解除 Go 工具鏈版本限制
+      - name: Unlock Go Toolchain Restriction
         run: |
+          cd sdk
+          find feeds/ -type f -name "golang-build.sh" -exec sed -i 's/GOTOOLCHAIN=local/GOTOOLCHAIN=auto/g' {} + || true
+
+      # 執行瘦身腳本 (若不存在則現場動態生成，防止報錯)
+      - name: Apply Private Slim Script
+        run: |
+          if [ ! -f "private.sh" ]; then
+            cat << 'EOF' > private.sh
+          #!/bin/bash
+          PASSWALL_MAKEFILES=$(find package/ -type f -name "Makefile" -path "*/luci-app-passwall2/*")
+          for mk in $PASSWALL_MAKEFILES; do
+              sed -i 's/+luci-app-passwall2_INCLUDE_[^ ]*/ /g' "$mk"
+              sed -i '/DEPENDS:=/c\  DEPENDS:=+xray-core +v2ray-geodata +dnsmasq-full +ip-full +ca-bundle +kmod-nft-tproxy +coreutils-timeout' "$mk"
+          done
+          XRAY_MAKEFILES=$(find package/ -type f -name "Makefile" -path "*/xray-core/*")
+          for xmk in $XRAY_MAKEFILES; do
+              if ! grep -q "GO_BUILD_TAGS:=" "$xmk"; then
+                  sed -i '/PKG_NAME:=xray-core/a GO_BUILD_LDFLAGS:=-s -w -buildid=\nGO_BUILD_TAGS:=confonly,novmess,notrojan,noshadowsocks,nossr' "$xmk"
+              fi
+              if ! grep -q "upx" "$xmk"; then
+                  sed -i '/define Package\/xray-core\/install/a \	upx --fast $(1)/usr/bin/xray || true' "$xmk"
+              fi
+          done
+          find package/ -type d \( -name "sing-box" -o -name "v2ray-core" -o -name "v2ray-plugin" -o -name "hysteria" -o -name "trojan*" -o -name "naiveproxy" -o -name "chinadns-ng" \) -exec rm -rf {} + 2>/dev/null || true
+          EOF
+          fi
           chmod +x private.sh
+          cp private.sh sdk/
+          cd sdk
           ./private.sh
 
+      # 精簡 .config 配置
       - name: Configure .config
         run: |
           cd sdk
@@ -91,7 +119,7 @@ jobs:
           echo "CONFIG_ALL_KMODS=n" >> .config
           echo "CONFIG_ALL=n" >> .config
           
-          # 【關鍵】啟用 LuCI 語言包生成開關
+          # 【關鍵修復】補上中文語言包生成的控制開關
           echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
           echo "CONFIG_LUCI_LANG_zh_Hant=y" >> .config
           
@@ -101,57 +129,55 @@ jobs:
           echo "CONFIG_PACKAGE_v2ray-geodata=m" >> .config
           echo "CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Xray=y" >> .config
           
-          # 停用非必要組件
+          # 關閉不必要的模組
           echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_ChinaDNS_NG is not set" >> .config
           echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Sing_Box is not set" >> .config
           echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_V2ray_Plugin is not set" >> .config
+          echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Shadowsocks_Libev_Client is not set" >> .config
+          echo "# CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_ShadowsocksR_Libev_Client is not set" >> .config
           
           make defconfig
 
-      - name: Compile Packages
+      # 編譯套件
+      - name: Compile Passwall2 & Packages
         run: |
           cd sdk
+          # 1. 編譯核心依賴包
+          for package in ${{ env.package_names }}; do
+              if [ -d "feeds/passwall_packages/$package" ]; then
+                  echo "----------- Begin Compiling $package ---------------"
+                  make package/$package/compile -j$(nproc) V=s || make package/$package/compile -j1 V=s
+              fi
+          done
+          
+          # 2. 編譯 PassWall2 主套件 (會自動編譯 i18n 語言包)
           make package/luci-app-passwall2/compile -j$(nproc) V=s || make package/luci-app-passwall2/compile -j1 V=s
-          make package/xray-core/compile -j$(nproc) V=s || make package/xray-core/compile -j1 V=s
-          make package/v2ray-geodata/compile -j$(nproc) V=s || make package/v2ray-geodata/compile -j1 V=s
 
+      # 收集編譯產物
       - name: Organize Artifacts
         run: |
           cd sdk
           mkdir -p tmp_upload upload
           
-          # 收集編譯好的 APK/IPK
+          # 收集 APK/IPK
           find bin/ -type f \( -name "luci-app-passwall2*" -o -name "luci-i18n-passwall2*" -o -name "xray-core*" -o -name "v2ray-geodata*" -o -name "ca-bundle*" -o -name "coreutils-timeout*" \) -exec cp {} tmp_upload/ \;
           
           pkg_count=$(ls -1 tmp_upload/* 2>/dev/null | wc -l)
-          ZIP_NAME="passwall2_slim_${{ matrix.platform }}.zip"
+          echo "Successfully collected $pkg_count target package files."
 
           if [ "$pkg_count" -gt 0 ]; then
-            zip -jr upload/$ZIP_NAME tmp_upload/*
+            zip -jr upload/passwall2_slim_${{ matrix.platform }}.zip tmp_upload/*
           else
             echo "Error: No target ipk/apk files found!" > tmp_upload/README.txt
-            zip -jr upload/$ZIP_NAME tmp_upload/*
+            zip -jr upload/passwall2_slim_${{ matrix.platform }}.zip tmp_upload/*
           fi
 
-          # 生成 Release Markdown 描述檔 (含壓縮包檔名清單)
-          cat <<EOF > upload/release_note_${{ matrix.platform }}.md
-          ### 📦 平台架構: \`${{ matrix.platform }}\`
-          
-          **壓縮包內包含的檔案數：** \`$pkg_count\`
-          
-          **檔案詳細清單：**
-          \`\`\`text
-          $(unzip -l upload/$ZIP_NAME | tail -n +4)
-          \`\`\`
-          EOF
-
+      # 發布產物至 GitHub Release
       - name: Upload Packages to Release
-        uses: softprops/action-gh-release@v2.1.0
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: v${{ needs.job_check.outputs.passwall2_version }}-slim
           files: sdk/upload/*.zip
-          body_path: sdk/upload/release_note_${{ matrix.platform }}.md
-          append_body: true
-          overwrite_files: true
+          overwrite: true
