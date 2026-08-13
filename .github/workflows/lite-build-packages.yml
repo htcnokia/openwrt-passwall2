@@ -37,13 +37,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 1. 路由器 ARM64 (中興 ZN M2 等 Filogic 方案，SDK 使用 apk/ipk)
+          # 1. 路由器 ARM64 (中興 ZN M2 等 Filogic 方案)
           - platform: aarch64_cortex-a53
             url_sdk: https://downloads.openwrt.org/snapshots/targets/mediatek/filogic/openwrt-sdk-mediatek-filogic_gcc-14.4.0_musl.Linux-x86_64.tar.zst
 
-          # 2. 軟路由 x86_64 (x86 PVE/ESXi/物理機測試用，使用 23.05 穩定版 SDK，輸出標準 .ipk)
+          # 2. 軟路由 x86_64 (升級為 Snapshots SDK，提供最新 Go 環境)
           - platform: x86_64
-            url_sdk: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz
+            url_sdk: https://downloads.openwrt.org/snapshots/targets/x86/64/openwrt-sdk-x86-64_gcc-14.4.0_musl.Linux-x86_64.tar.zst
 
     steps:
       - name: Checkout Repository
@@ -52,19 +52,14 @@ jobs:
       - name: Initialization Environment
         run: |
           sudo -E apt-get -qq update
-          sudo -E apt-get -qq install -y build-essential git wget curl unzip upx-ucl zstd
+          sudo -E apt-get -qq install -y build-essential git wget curl unzip upx-ucl zstd golang
           sudo -E apt-get -qq clean
 
       - name: Download & Extract OpenWrt SDK
         run: |
           mkdir sdk
-          if [[ "${{ matrix.url_sdk }}" == *.tar.zst ]]; then
-            wget ${{ matrix.url_sdk }} -O sdk.tar.zst
-            tar --zstd -x -f sdk.tar.zst -C ./sdk --strip-components=1
-          else
-            wget ${{ matrix.url_sdk }} -O sdk.tar.xz
-            tar -x -f sdk.tar.xz -C ./sdk --strip-components=1
-          fi
+          wget ${{ matrix.url_sdk }} -O sdk.tar.zst
+          tar --zstd -x -f sdk.tar.zst -C ./sdk --strip-components=1
           
           cd sdk
           # 更新 Feeds 源
@@ -82,6 +77,12 @@ jobs:
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
+      # 【關鍵修正】：允許 Go 工具鏈自動下載與升級，避免 Go 版本太低報錯
+      - name: Unlock Go Toolchain Restriction
+        run: |
+          cd sdk
+          find feeds/ -type f -name "golang-build.sh" -exec sed -i 's/GOTOOLCHAIN=local/GOTOOLCHAIN=auto/g' {} + || true
 
       # 注入 private.sh 精簡與 UPX 腳本
       - name: Apply Private Slim & UPX Script
@@ -126,17 +127,16 @@ jobs:
           cd sdk
           mkdir -p tmp_upload upload
           
-          # 【關鍵修復】：同時搜尋 *.ipk 以及最新的 *.apk 檔案！
+          # 同時搜尋 *.ipk 以及 *.apk 檔案
           find bin/ -type f \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} tmp_upload/ \;
           
-          # 檢查抓到的包數量
           pkg_count=$(ls -1 tmp_upload/* 2>/dev/null | wc -l)
           echo "Successfully collected $pkg_count package files."
 
           if [ "$pkg_count" -gt 0 ]; then
             zip -jr upload/passwall2_slim_${{ matrix.platform }}.zip tmp_upload/*
           else
-            echo "Error: Still no ipk/apk files found!" > tmp_upload/README.txt
+            echo "Error: No ipk/apk files found!" > tmp_upload/README.txt
             zip -jr upload/passwall2_slim_${{ matrix.platform }}.zip tmp_upload/*
           fi
 
