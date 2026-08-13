@@ -1,4 +1,4 @@
-name: "Auto compile Slim PassWall2 with SDK"
+name: "Auto compile PassWall2 with SDK"
 
 on:
   repository_dispatch:
