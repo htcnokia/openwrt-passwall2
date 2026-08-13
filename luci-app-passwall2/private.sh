@@ -17,8 +17,7 @@ for mk in $PASSWALL_MAKEFILES; do
     
     # 清理舊依賴，寫入極簡依賴
     sed -i 's/+luci-app-passwall2_INCLUDE_[^ ]*/ /g' "$mk"
-    sed -i '/DEPENDS:=/c\  DEPENDS:=+xray-core +v2ray-geodata +dnsmasq-full +ip-full +ca-bundle +kmod-nft-tproxy' "$mk"
-
+    sed -i '/DEPENDS:=/c\  DEPENDS:=+xray-core +v2ray-geodata +dnsmasq-full +ip-full +ca-bundle +kmod-nft-tproxy +coreutils-timeout +luci-i18n-passwall2-zh-cn' "$mk"
     # 【核心修復】確保 Makefile 末尾包含語言包 call BuildPackage 定義
     # 避免 Slimming 過程漏掉 i18n package
     if ! grep -q "luci-i18n-passwall2-zh-cn" "$mk"; then
