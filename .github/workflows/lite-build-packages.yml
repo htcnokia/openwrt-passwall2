@@ -1,24 +1,13 @@
-#
-# Copyright (c) 2022-2023 SMALLPROGRAM / Modified for Slim PassWall2
-#
 name: "Auto compile Slim PassWall2 with SDK"
 
 on:
   repository_dispatch:
   workflow_dispatch:
-    inputs:
-      ssh:
-        description: 'SSH connection to Actions'
-        required: false
-        default: 'false'
 
 env:
   TZ: Asia/Shanghai
   passwall2: ${{ github.repository }}
-  packages: Openwrt-Passwall/openwrt-passwall-packages
-  # 【精簡1】只保留最核心的組件，剔除 naiveproxy / hysteria / shadowsocks 等重型二進位
   package_names: "chinadns-ng geoview tcping v2ray-geodata xray-core"
-  package_release: "chinadns-ng geoview tcping v2ray-geoip v2ray-geosite xray-core"
 
 permissions:
   contents: write
@@ -30,24 +19,15 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       passwall2_version: ${{ steps.check_version.outputs.latest_version }}
-      has_update: ${{ steps.check_version.outputs.has_update }}
-      prerelease: ${{ steps.check_version.outputs.prerelease }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.ref_name }}
 
       - name: Check version
         id: check_version
-        env:
-          url_tags: https://api.github.com/repos/${{ env.passwall2 }}/releases/latest
         run: |
-          latest_version=$(awk -F ':=' '/^PKG_VERSION:=|^PKG_RELEASE:=/ {print $2}' Makefile 2>/dev/null || echo "1.0.0")
+          latest_version=$(awk -F ':=' '/^PKG_VERSION:=|^PKG_RELEASE:=/ {print $2}' Makefile 2>/dev/null | tr -d ' ' || echo "1.0.0")
           echo "latest_version=${latest_version}" >> $GITHUB_OUTPUT
-          echo "prerelease=false" >> $GITHUB_OUTPUT
-          echo "has_update=true" >> $GITHUB_OUTPUT
 
   job_auto_compile:
     needs: job_check
@@ -57,10 +37,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 【精簡2】只專注編譯 arm64 (適用於中興 ZN M2 等主流 ARM64 路由器)
+          # 1. 路由器 ARM64 (中興 ZN M2 等 Filogic 方案，SDK 使用 apk/ipk)
           - platform: aarch64_cortex-a53
             url_sdk: https://downloads.openwrt.org/snapshots/targets/mediatek/filogic/openwrt-sdk-mediatek-filogic_gcc-14.4.0_musl.Linux-x86_64.tar.zst
-            ver: "ipk"
+
+          # 2. 軟路由 x86_64 (x86 PVE/ESXi/物理機測試用，使用 23.05 穩定版 SDK，輸出標準 .ipk)
+          - platform: x86_64
+            url_sdk: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-sdk-23.05.5-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz
 
     steps:
       - name: Checkout Repository
@@ -74,11 +57,16 @@ jobs:
 
       - name: Download & Extract OpenWrt SDK
         run: |
-          wget ${{ matrix.url_sdk }} -O sdk.tar.zst
           mkdir sdk
-          tar --zstd -x -f sdk.tar.zst -C ./sdk --strip-components=1
-          cd sdk
+          if [[ "${{ matrix.url_sdk }}" == *.tar.zst ]]; then
+            wget ${{ matrix.url_sdk }} -O sdk.tar.zst
+            tar --zstd -x -f sdk.tar.zst -C ./sdk --strip-components=1
+          else
+            wget ${{ matrix.url_sdk }} -O sdk.tar.xz
+            tar -x -f sdk.tar.xz -C ./sdk --strip-components=1
+          fi
           
+          cd sdk
           # 更新 Feeds 源
           sed -i \
               -e 's|git\.openwrt\.org/feed|github.com/openwrt|g' \
@@ -95,14 +83,12 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # 【關鍵核心】：在編譯前注入你的 private.sh 進行 UPX 瘦身修補！
+      # 注入 private.sh 精簡與 UPX 腳本
       - name: Apply Private Slim & UPX Script
         run: |
-          # 將目前倉庫的 PassWall2 拷貝到 SDK 的 package 目錄
           mkdir -p sdk/package/luci-app-passwall2
           cp -rf Makefile Config-build.in root luci-app-passwall2/ 2>/dev/null || cp -rf ./* sdk/package/luci-app-passwall2/ 2>/dev/null || true
           
-          # 執行 private.sh 瘦身腳本
           if [ -f "private.sh" ]; then
             chmod +x private.sh
             cd sdk
@@ -140,25 +126,23 @@ jobs:
           cd sdk
           mkdir -p tmp_upload upload
           
-          # 1. 廣泛搜尋 bin/ 目錄下所有生成出的 .ipk 檔案，並複製到 tmp_upload
-          find bin/ -type f -name "*.ipk" -exec cp {} tmp_upload/ \;
+          # 【關鍵修復】：同時搜尋 *.ipk 以及最新的 *.apk 檔案！
+          find bin/ -type f \( -name "*.ipk" -o -name "*.apk" \) -exec cp {} tmp_upload/ \;
           
-          # 2. 檢查是否有收集到 .ipk 檔案
-          ipk_count=$(ls -1 tmp_upload/*.ipk 2>/dev/null | wc -l)
-          echo "Found $ipk_count .ipk files."
+          # 檢查抓到的包數量
+          pkg_count=$(ls -1 tmp_upload/* 2>/dev/null | wc -l)
+          echo "Successfully collected $pkg_count package files."
 
-          if [ "$ipk_count" -gt 0 ]; then
-            # 如果有檔案，正常打包
+          if [ "$pkg_count" -gt 0 ]; then
             zip -jr upload/passwall2_slim_${{ matrix.platform }}.zip tmp_upload/*
           else
-            # 如果沒有檔案，生成一個说明文件避免 zip 報錯，並在日誌提醒
-            echo "Warning: No ipk files found!" > tmp_upload/README.txt
+            echo "Error: Still no ipk/apk files found!" > tmp_upload/README.txt
             zip -jr upload/passwall2_slim_${{ matrix.platform }}.zip tmp_upload/*
           fi
 
           echo "FIRMWARE=$PWD/upload" >> $GITHUB_ENV
 
-      - name: Upload IPKs to Release
+      - name: Upload Packages to Release
         uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
