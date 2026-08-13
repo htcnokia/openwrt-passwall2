@@ -9,6 +9,7 @@ env:
   passwall2: ${{ github.repository }}
   # 保留 v2ray-geodata 以進行 AI 分流 (geoip / geosite)
   package_names: "v2ray-geodata xray-core"
+  FIRMWARE: "sdk/upload"
 
 permissions:
   contents: write
@@ -157,12 +158,49 @@ jobs:
 
           echo "FIRMWARE=$PWD/upload" >> $GITHUB_ENV
 
+      # 收集編譯產物並生成 Release 描述文件
+      - name: Organize Artifacts
+        run: |
+          cd sdk
+          mkdir -p tmp_upload upload
+          
+          # 放寬匹配規則：包含 passwall2, xray, geodata, ca-bundle, coreutils-timeout 等
+          find bin/ -type f \( -name "luci-app-passwall2*" -o -name "luci-i18n-passwall2*" -o -name "xray-core*" -o -name "v2ray-geodata*" -o -name "ca-bundle*" -o -name "coreutils-timeout*" \) -exec cp {} tmp_upload/ \;
+          
+          pkg_count=$(ls -1 tmp_upload/* 2>/dev/null | wc -l)
+          echo "Successfully collected $pkg_count target package files."
+
+          ZIP_NAME="passwall2_slim_${{ matrix.platform }}.zip"
+
+          if [ "$pkg_count" -gt 0 ]; then
+            zip -jr upload/$ZIP_NAME tmp_upload/*
+          else
+            echo "Error: No target ipk/apk files found!" > tmp_upload/README.txt
+            zip -jr upload/$ZIP_NAME tmp_upload/*
+          fi
+
+          # 【新增】生成 Release 的 Markdown 描述文字 (包含壓縮包內檔案清單)
+          cat <<EOF > upload/release_note_${{ matrix.platform }}.md
+          ### 📦 平台架構: \`${{ matrix.platform }}\`
+          
+          **壓縮包內包含的檔案數：** \`$pkg_count\`
+          
+          **檔案詳細清單：**
+          \`\`\`text
+          $(unzip -l upload/$ZIP_NAME | tail -n +4)
+          \`\`\`
+          EOF
+
+          echo "FIRMWARE=$PWD/upload" >> $GITHUB_ENV
+
       # 發布產物至 GitHub Release
       - name: Upload Packages to Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.1.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: v${{ needs.job_check.outputs.passwall2_version }}-slim
-          files: ${{ env.FIRMWARE }}/*
-          overwrite: true
+          files: ${{ env.FIRMWARE }}/*.zip
+          body_path: ${{ env.FIRMWARE }}/release_note_${{ matrix.platform }}.md
+          append_body: true 
+          overwrite_files: true
