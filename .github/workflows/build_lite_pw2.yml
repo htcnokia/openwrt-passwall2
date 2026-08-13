@@ -58,7 +58,7 @@ jobs:
       - name: Setup Environment
         run: |
           sudo -E apt-get -qq update
-          sudo -E apt-get -qq install build-essential clang flex gawk gcc-multilib gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zstd upx
+          sudo -E apt-get -qq install build-essential clang flex gawk gcc-multilib gettext git libncurses5-dev libssl-dev python3-setuptools rsync unzip zstd upx
           sudo -E apt-get -qq clean
 
       - name: Download & Extract OpenWrt SDK
